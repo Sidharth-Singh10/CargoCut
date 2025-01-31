@@ -1,0 +1,7 @@
+// to fetch ranges of each table
+SELECT 
+    inhrelid::regclass AS partition_table, 
+    pg_get_expr(c.relpartbound, c.oid) AS partition_range
+FROM pg_inherits
+JOIN pg_class c ON inhrelid = c.oid
+WHERE inhparent = 'urls'::regclass;

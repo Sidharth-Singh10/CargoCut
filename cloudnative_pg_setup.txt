@@ -1,0 +1,37 @@
+
+// First
+kubectl apply --server-side -f \
+  https://raw.githubusercontent.com/cloudnative-pg/cloudnative-pg/release-1.25/releases/cnpg-1.25.0.yaml
+
+// Second Setup prometheus and grafana
+helm repo add prometheus-community \
+  https://prometheus-community.github.io/helm-charts
+
+helm upgrade --install \
+  -f https://raw.githubusercontent.com/cloudnative-pg/cloudnative-pg/main/docs/src/samples/monitoring/kube-stack-config.yaml \
+  prometheus-community \
+  prometheus-community/kube-prometheus-stack
+
+// Third Deploy Monitored Clustor
+
+kubectl apply -f - <<EOF
+---
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: cluster-with-metrics
+spec:
+  instances: 3
+
+  storage:
+    size: 1Gi
+
+  monitoring:
+    enablePodMonitor: true
+EOF
+
+// Rest
+
+kubectl port-forward svc/prometheus-community-kube-prometheus 9090
+kubectl port-forward svc/prometheus-community-grafana 3000:80
+kubectl port-forward svc/cluster-with-metrics-rw 5432:5432 
