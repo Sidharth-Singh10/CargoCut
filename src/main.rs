@@ -7,6 +7,7 @@ use axum::{
 };
 use errors::AppError;
 use models::{CreateUrl, UrlResponse};
+use redis::RedisManager;
 use sqlx::PgPool;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -15,12 +16,13 @@ mod aws;
 mod cron;
 mod errors;
 mod models;
-
+mod redis;
 #[derive(Clone)]
 struct AppState {
     pool: PgPool,
     filter: Arc<Mutex<qfilter::Filter>>,
     persistence: Arc<FilterPersistence>,
+    redis: RedisManager,
 }
 
 async fn create_short_url(
@@ -136,6 +138,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Run migrations
     sqlx::migrate!("./migrations").run(&pool).await?;
 
+    tracing::info!("Connecting to redis server...");
+    let redis_urls: Vec<String> = vec![
+        "redis://127.0.0.1:7000".into(),
+        "redis://127.0.0.1:7001".into(),
+        "redis://127.0.0.1:7002".into(),
+    ];
+
+    let redis_manager = redis::RedisManager::new(redis_urls).await?;
+
     let filter = initialize_filter_service().await?;
     let persistence =
         FilterPersistence::new("affinitys3".to_string(), "qfilter-backups".to_string()).await?;
@@ -144,6 +155,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         pool: pool.clone(),
         filter: Arc::new(Mutex::new(filter)),
         persistence: Arc::new(persistence),
+        redis: redis_manager,
     });
 
     let snapshot_filter = app_state.filter.clone();
