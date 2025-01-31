@@ -1,58 +1,26 @@
 use aws::persistance::{initialize_filter_service, FilterPersistence};
 use axum::{
     extract::{Path, State},
-    http::StatusCode,
     response::Redirect,
     routing::{get, post},
     Json, Router,
 };
-use serde::{Deserialize, Serialize};
-use sqlx::{types::chrono::Utc, PgPool};
+use errors::AppError;
+use models::{CreateUrl, UrlResponse};
+use sqlx::PgPool;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tower_http::trace::TraceLayer;
 mod aws;
+mod cron;
+mod errors;
+mod models;
 
 #[derive(Clone)]
 struct AppState {
     pool: PgPool,
     filter: Arc<Mutex<qfilter::Filter>>,
     persistence: Arc<FilterPersistence>,
-}
-
-#[derive(Deserialize)]
-struct CreateUrl {
-    long_url: String,
-    months_valid: Option<u32>, // Optional expiry days
-    custom_short_code: Option<String>,
-}
-
-#[derive(Serialize)]
-struct UrlResponse {
-    short_code: String,
-    long_url: String,
-    expiry_date: String,
-}
-
-#[derive(thiserror::Error, Debug)]
-enum AppError {
-    #[error("Database error: {0}")]
-    Database(#[from] sqlx::Error),
-    #[error("URL not found or expired")]
-    NotFound,
-}
-
-impl axum::response::IntoResponse for AppError {
-    fn into_response(self) -> axum::response::Response {
-        match self {
-            AppError::Database(err) => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Database error: {}", err),
-            )
-                .into_response(),
-            AppError::NotFound => StatusCode::NOT_FOUND.into_response(),
-        }
-    }
 }
 
 async fn create_short_url(
@@ -156,25 +124,6 @@ async fn redirect_to_long_url(
     Ok(Redirect::permanent(&url.long_url))
 }
 
-// Function to drop expired partitions
-async fn cleanup_expired_partitions(pool: &PgPool) -> Result<(), sqlx::Error> {
-    let expired_month = Utc::now()
-        .date_naive()
-        .checked_sub_months(chrono::Months::new(1))
-        .unwrap();
-
-    let partition_name = format!(
-        "urls_y{}m{}",
-        expired_month.format("%Y"),
-        expired_month.format("%m")
-    );
-
-    sqlx::query(&format!("DROP TABLE IF EXISTS {}", partition_name))
-        .execute(pool)
-        .await?;
-
-    Ok(())
-}
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     dotenv::dotenv().ok();
@@ -208,7 +157,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut interval = tokio::time::interval(chrono::Duration::days(1).to_std().unwrap());
         loop {
             interval.tick().await;
-            if let Err(e) = cleanup_expired_partitions(&pool).await {
+            if let Err(e) = cron::cleanup_expired_partitions(&pool).await {
                 eprintln!("Cleanup error: {}", e);
             }
         }
@@ -226,5 +175,3 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     Ok(())
 }
-
-// Create a background task for saving snapshots

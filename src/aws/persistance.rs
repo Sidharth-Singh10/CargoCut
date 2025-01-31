@@ -1,11 +1,11 @@
-use aws_sdk_s3::{Client, Config};
+use aws_sdk_s3::Client;
 use bincode;
+use bincode::Options;
 use bytes::Bytes;
 use chrono::Utc;
 use qfilter::Filter;
 use serde::{Deserialize, Serialize};
 use std::error::Error;
-use bincode::Options;
 #[derive(Serialize, Deserialize, Debug, Clone)]
 struct FilterSnapshot {
     filter: Filter,
