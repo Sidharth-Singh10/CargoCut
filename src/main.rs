@@ -1,3 +1,4 @@
+use aws::persistance::{initialize_filter_service, FilterPersistence};
 use axum::{
     extract::{Path, State},
     http::StatusCode,
@@ -8,17 +9,22 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use sqlx::{types::chrono::Utc, PgPool};
 use std::sync::Arc;
+use tokio::sync::Mutex;
 use tower_http::trace::TraceLayer;
+mod aws;
 
 #[derive(Clone)]
 struct AppState {
     pool: PgPool,
+    filter: Arc<Mutex<qfilter::Filter>>,
+    persistence: Arc<FilterPersistence>,
 }
 
 #[derive(Deserialize)]
 struct CreateUrl {
     long_url: String,
-    days_valid: Option<u32>, // Optional expiry days
+    months_valid: Option<u32>, // Optional expiry days
+    custom_short_code: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -53,10 +59,13 @@ async fn create_short_url(
     State(state): State<Arc<AppState>>,
     Json(payload): Json<CreateUrl>,
 ) -> Result<Json<UrlResponse>, AppError> {
-    let short_code = nanoid::nanoid!(8);
+    let short_code = match payload.custom_short_code {
+        Some(custom) => custom,
+        None => nanoid::nanoid!(8),
+    };
     let current_date = chrono::Utc::now();
     let expiry_date_str = current_date
-        .checked_add_months(chrono::Months::new(payload.days_valid.unwrap_or(1)))
+        .checked_add_months(chrono::Months::new(payload.months_valid.unwrap_or(1)))
         .unwrap()
         .format("%Y-%m-%d")
         .to_string();
@@ -65,14 +74,25 @@ async fn create_short_url(
     let expiry_date = sqlx::types::time::Date::parse(&expiry_date_str, format).unwrap();
 
     let expiry_date_str2 = current_date
-        .checked_add_months(chrono::Months::new(payload.days_valid.unwrap_or(1)+1))
+        .checked_add_months(chrono::Months::new(payload.months_valid.unwrap_or(1) + 1))
         .unwrap()
         .format("%Y-%m-%d")
         .to_string();
 
-    let end_month = sqlx::types::time::Date::parse(&expiry_date_str2, format).unwrap().replace_day(1).unwrap();
+    let end_month = sqlx::types::time::Date::parse(&expiry_date_str2, format)
+        .unwrap()
+        .replace_day(1)
+        .unwrap();
 
-    let partition_name = format!("urls_y{}m{:02}", expiry_date.year(), current_date.date_naive().checked_add_months(chrono::Months::new(payload.days_valid.unwrap_or(1))).unwrap().format("%m"));
+    let partition_name = format!(
+        "urls_y{}m{:02}",
+        expiry_date.year(),
+        current_date
+            .date_naive()
+            .checked_add_months(chrono::Months::new(payload.months_valid.unwrap_or(1)))
+            .unwrap()
+            .format("%m")
+    );
 
     tracing::info!("Partition name: {}", partition_name);
     tracing::info!("End date: {}", end_month);
@@ -89,6 +109,10 @@ async fn create_short_url(
 
     sqlx::query(&query).execute(&state.pool).await?;
 
+    if state.filter.lock().await.contains(&short_code) {
+        return Err(AppError::NotFound);
+    }
+
     sqlx::query!(
         "INSERT INTO urls (short_code, long_url, expiry_date)
     VALUES ($1, $2, $3::date)",
@@ -98,6 +122,10 @@ async fn create_short_url(
     )
     .execute(&state.pool)
     .await?;
+
+    let insertion = state.filter.lock().await.insert(&short_code);
+
+    tracing::info!("Insertion: {:#?}", insertion);
 
     Ok(Json(UrlResponse {
         short_code,
@@ -110,6 +138,11 @@ async fn redirect_to_long_url(
     State(state): State<Arc<AppState>>,
     Path(short_code): Path<String>,
 ) -> Result<Redirect, AppError> {
+    if !state.filter.lock().await.contains(&short_code) {
+        tracing::info!("Short code not found in filter");
+        return Err(AppError::NotFound);
+    }
+
     let url = sqlx::query!(
         "SELECT long_url FROM urls 
          WHERE short_code = $1 
@@ -154,7 +187,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Run migrations
     sqlx::migrate!("./migrations").run(&pool).await?;
 
-    let app_state = Arc::new(AppState { pool: pool.clone() });
+    let filter = initialize_filter_service().await?;
+    let persistence =
+        FilterPersistence::new("affinitys3".to_string(), "qfilter-backups".to_string()).await?;
+
+    let app_state = Arc::new(AppState {
+        pool: pool.clone(),
+        filter: Arc::new(Mutex::new(filter)),
+        persistence: Arc::new(persistence),
+    });
+
+    let snapshot_filter = app_state.filter.clone();
+    let snapshot_persistence = app_state.persistence.clone();
+    tokio::spawn(async move {
+        aws::persistance::run_snapshot_service(snapshot_filter, snapshot_persistence).await;
+    });
 
     // Schedule cleanup task
     tokio::spawn(async move {
@@ -179,3 +226,5 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     Ok(())
 }
+
+// Create a background task for saving snapshots
