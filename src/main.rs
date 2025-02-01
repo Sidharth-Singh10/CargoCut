@@ -1,10 +1,14 @@
-use aws::persistance::{initialize_filter_service, FilterPersistence};
+use aws::persistance::{
+    initialize_distributed_filter_system, run_distributed_snapshot_service,
+    DistributedFilterPersistence,
+};
 use axum::{
     extract::{Path, State},
     response::Redirect,
     routing::{get, post},
     Json, Router,
 };
+use distributed_filter::DistributedFilter;
 use errors::AppError;
 use models::{CreateUrl, UrlResponse};
 use redis::RedisManager;
@@ -14,14 +18,15 @@ use tokio::sync::Mutex;
 use tower_http::trace::TraceLayer;
 mod aws;
 mod cron;
+mod distributed_filter;
 mod errors;
 mod models;
 mod redis;
+
 #[derive(Clone)]
 struct AppState {
     pool: PgPool,
-    filter: Arc<Mutex<qfilter::Filter>>,
-    persistence: Arc<FilterPersistence>,
+    distributed_filter: Arc<Mutex<DistributedFilter>>,
     redis: RedisManager,
 }
 
@@ -79,7 +84,12 @@ async fn create_short_url(
 
     sqlx::query(&query).execute(&state.pool).await?;
 
-    if state.filter.lock().await.contains(&short_code) {
+    if state
+        .distributed_filter
+        .lock()
+        .await
+        .contains(&short_code, current_date.date_naive())
+    {
         return Err(AppError::NotFound);
     }
 
@@ -93,7 +103,13 @@ async fn create_short_url(
     .execute(&state.pool)
     .await?;
 
-    let insertion = state.filter.lock().await.insert(&short_code);
+    let insertion = state.distributed_filter.lock().await.insert(
+        &short_code,
+        current_date
+            .checked_add_months(chrono::Months::new(payload.months_valid.unwrap_or(1)))
+            .unwrap()
+            .date_naive(),
+    );
 
     tracing::info!("Insertion: {:#?}", insertion);
 
@@ -108,7 +124,12 @@ async fn redirect_to_long_url(
     State(state): State<Arc<AppState>>,
     Path(short_code): Path<String>,
 ) -> Result<Redirect, AppError> {
-    if !state.filter.lock().await.contains(&short_code) {
+    if !state
+        .distributed_filter
+        .lock()
+        .await
+        .contains(&short_code, chrono::Utc::now().date_naive())
+    {
         tracing::info!("Short code not found in filter");
         return Err(AppError::NotFound);
     }
@@ -138,30 +159,35 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Run migrations
     sqlx::migrate!("./migrations").run(&pool).await?;
 
+    // Initialize distributed filter system
+    let distributed_filter = initialize_distributed_filter_system(
+        &pool,
+        "affinitys3".to_string(),
+        "distributed-filter-backups".to_string(),
+    )
+    .await?;
+
+    // Initialize the persistence service
+    let filter_persistence = Arc::new(
+        DistributedFilterPersistence::new(
+            "affinitys3".to_string(),
+            "distributed-filter-backups".to_string(),
+        )
+        .await?,
+    );
     tracing::info!("Connecting to redis server...");
     let redis_urls: Vec<String> = vec![
-        "redis://127.0.0.1:7000".into(),
-        "redis://127.0.0.1:7001".into(),
-        "redis://127.0.0.1:7002".into(),
+        "redis://localhost:6379".into(), // If using minikube tunnel
+                                         // OR use the external IP if you're on a cloud provider
+                                         // "redis://<EXTERNAL-IP>:6379".into()
     ];
 
     let redis_manager = redis::RedisManager::new(redis_urls).await?;
 
-    let filter = initialize_filter_service().await?;
-    let persistence =
-        FilterPersistence::new("affinitys3".to_string(), "qfilter-backups".to_string()).await?;
-
     let app_state = Arc::new(AppState {
         pool: pool.clone(),
-        filter: Arc::new(Mutex::new(filter)),
-        persistence: Arc::new(persistence),
+        distributed_filter: distributed_filter.clone(),
         redis: redis_manager,
-    });
-
-    let snapshot_filter = app_state.filter.clone();
-    let snapshot_persistence = app_state.persistence.clone();
-    tokio::spawn(async move {
-        aws::persistance::run_snapshot_service(snapshot_filter, snapshot_persistence).await;
     });
 
     // Schedule cleanup task
@@ -174,6 +200,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     });
+
+    // tokio::spawn(async move {
+    //     run_distributed_snapshot_service(distributed_filter, filter_persistence)
+    //         .await;
+    // });
 
     let app = Router::new()
         .route("/api/urls", post(create_short_url))
