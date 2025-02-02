@@ -1,0 +1,16 @@
+# redis-external-service.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis-cluster-external
+spec:
+  type: LoadBalancer  # Or NodePort if you're using Minikube
+  ports:
+  - port: 6379
+    targetPort: 6379
+    name: client
+  - port: 16379
+    targetPort: 16379
+    name: gossip
+  selector:
+    app: redis-cluster

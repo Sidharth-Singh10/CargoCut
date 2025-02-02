@@ -1,0 +1,123 @@
+# configmap.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: redis-cluster-config
+data:
+  redis.conf: |
+    port 6379
+    cluster-enabled yes
+    cluster-config-file nodes.conf
+    cluster-node-timeout 5000
+    appendonly yes
+    protected-mode no
+---
+# headless-service.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis-cluster-headless
+spec:
+  clusterIP: None
+  ports:
+  - port: 6379
+    targetPort: 6379
+    name: client
+  - port: 16379
+    targetPort: 16379
+    name: gossip
+  selector:
+    app: redis-cluster
+---
+# statefulset.yaml
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: redis-cluster
+spec:
+  serviceName: redis-cluster-headless
+  replicas: 6  # 3 master & 3 replica nodes
+  selector:
+    matchLabels:
+      app: redis-cluster
+  template:
+    metadata:
+      labels:
+        app: redis-cluster
+    spec:
+      containers:
+      - name: redis
+        image: redis:7.0-alpine
+        ports:
+        - containerPort: 6379
+          name: client
+        - containerPort: 16379
+          name: gossip
+        command: ["/bin/sh"]
+        args: ["-c", "redis-server /etc/redis/redis.conf"]
+        volumeMounts:
+        - name: redis-config
+          mountPath: /etc/redis/
+        - name: redis-data
+          mountPath: /data
+        resources:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+          limits:
+            cpu: 500m
+            memory: 512Mi
+      volumes:
+      - name: redis-config
+        configMap:
+          name: redis-cluster-config
+  volumeClaimTemplates:
+  - metadata:
+      name: redis-data
+    spec:
+      accessModes: [ "ReadWriteOnce" ]
+      resources:
+        requests:
+          storage: 1Gi
+---
+# cluster-init-job.yaml
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: redis-cluster-init
+spec:
+  template:
+    spec:
+      containers:
+      - name: redis-cluster-init
+        image: redis:7.0-alpine
+        command: 
+        - sh
+        - -c
+        - |
+          until redis-cli -h redis-cluster-0.redis-cluster-headless cluster info; do
+            echo "Waiting for all Redis nodes to be ready..."
+            sleep 2
+          done
+          redis-cli --cluster create \
+            redis-cluster-0.redis-cluster-headless:6379 \
+            redis-cluster-1.redis-cluster-headless:6379 \
+            redis-cluster-2.redis-cluster-headless:6379 \
+            redis-cluster-3.redis-cluster-headless:6379 \
+            redis-cluster-4.redis-cluster-headless:6379 \
+            redis-cluster-5.redis-cluster-headless:6379 \
+            --cluster-replicas 1 --cluster-yes
+      restartPolicy: OnFailure
+---
+# service.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis-cluster
+spec:
+  ports:
+  - port: 6379
+    targetPort: 6379
+    name: client
+  selector:
+    app: redis-cluster

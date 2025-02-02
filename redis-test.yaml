@@ -1,0 +1,19 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: redis-test
+spec:
+  containers:
+  - name: redis-test
+    image: redis:7.0-alpine
+    command: 
+      - sh
+      - -c
+      - |
+        echo "Testing connection to Redis cluster nodes..."
+        for i in 0 1 2 3 4 5; do
+          echo "Testing redis-cluster-$i.redis-cluster-headless:6379..."
+          redis-cli -h redis-cluster-$i.redis-cluster-headless -p 6379 ping
+        done
+        echo "Testing cluster connection..."
+        redis-cli -h redis-cluster -p 6379 cluster info

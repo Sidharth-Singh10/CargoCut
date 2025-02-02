@@ -35,3 +35,5 @@ EOF
 kubectl port-forward svc/prometheus-community-kube-prometheus 9090
 kubectl port-forward svc/prometheus-community-grafana 3000:80
 kubectl port-forward svc/cluster-with-metrics-rw 5432:5432 
+
+kubectl port-forward svc/cluster-with-metrics-rw 5432:5432   
