@@ -6,6 +6,8 @@ pub enum AppError {
     Database(#[from] sqlx::Error),
     #[error("URL not found or expired")]
     NotFound,
+    #[error("Redis error: {0}")]
+    Redis(#[from] redis::RedisError),
 }
 
 impl axum::response::IntoResponse for AppError {
@@ -17,6 +19,11 @@ impl axum::response::IntoResponse for AppError {
             )
                 .into_response(),
             AppError::NotFound => StatusCode::NOT_FOUND.into_response(),
+            AppError::Redis(err) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Redis error: {}", err),
+            )
+                .into_response(),
         }
     }
 }

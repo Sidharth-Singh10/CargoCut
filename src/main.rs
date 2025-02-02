@@ -1,7 +1,4 @@
-use aws::persistance::{
-    initialize_distributed_filter_system, run_distributed_snapshot_service,
-    DistributedFilterPersistence,
-};
+use aws::persistance::initialize_distributed_filter_system;
 use axum::{
     extract::{Path, State},
     response::Redirect,
@@ -92,7 +89,13 @@ async fn create_short_url(
     {
         return Err(AppError::NotFound);
     }
+/////////////////////////
+    state
+        .redis
+        .set_short_url(&short_code, &payload.long_url)
+        .await?;
 
+///////////////////////
     sqlx::query!(
         "INSERT INTO urls (short_code, long_url, expiry_date)
     VALUES ($1, $2, $3::date)",
@@ -134,17 +137,24 @@ async fn redirect_to_long_url(
         return Err(AppError::NotFound);
     }
 
-    let url = sqlx::query!(
-        "SELECT long_url FROM urls 
-         WHERE short_code = $1 
-         AND expiry_date >= CURRENT_DATE",
-        short_code
-    )
-    .fetch_optional(&state.pool)
-    .await?
-    .ok_or(AppError::NotFound)?;
+    match state.redis.get_long_url(&short_code).await? {
+        Some(long_url) =>{
+            tracing::info!("Got it from redis");
+            return Ok(Redirect::permanent(&long_url))},
+        None => {
+            let url = sqlx::query!(
+                "SELECT long_url FROM urls
+                 WHERE short_code = $1
+                 AND expiry_date >= CURRENT_DATE",
+                short_code
+            )
+            .fetch_optional(&state.pool)
+            .await?
+            .ok_or(AppError::NotFound)?;
 
-    Ok(Redirect::permanent(&url.long_url))
+            Ok(Redirect::permanent(&url.long_url))
+        }
+    }
 }
 
 #[tokio::main]
@@ -167,22 +177,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     )
     .await?;
 
-    // Initialize the persistence service
-    let filter_persistence = Arc::new(
-        DistributedFilterPersistence::new(
-            "affinitys3".to_string(),
-            "distributed-filter-backups".to_string(),
-        )
-        .await?,
-    );
-    tracing::info!("Connecting to redis server...");
-    let redis_urls: Vec<String> = vec![
-        "redis://localhost:6379".into(), // If using minikube tunnel
-                                         // OR use the external IP if you're on a cloud provider
-                                         // "redis://<EXTERNAL-IP>:6379".into()
-    ];
-
-    let redis_manager = redis::RedisManager::new(redis_urls).await?;
+     let redis_manager = redis::RedisManager::new("redis://localhost:6379").await?;
 
     let app_state = Arc::new(AppState {
         pool: pool.clone(),

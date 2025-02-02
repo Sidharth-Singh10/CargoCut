@@ -1,9 +1,6 @@
 use chrono::{Datelike, NaiveDate, Utc};
 use qfilter::Filter;
-use sqlx::PgPool;
 use std::collections::HashMap;
-use std::sync::Arc;
-use tokio::sync::Mutex;
 use tracing::info;
 
 // Structure to hold filter information for a partition
