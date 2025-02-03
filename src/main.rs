@@ -7,7 +7,9 @@ use axum::{
 };
 use distributed_filter::DistributedFilter;
 use errors::AppError;
+use metrics::{CPU_USAGE, MEMORY_USAGE, REQUEST_COUNTER, REQUEST_DURATION};
 use models::{CreateUrl, UrlResponse};
+use prometheus::{Encoder, TextEncoder};
 use redis::RedisManager;
 use sqlx::PgPool;
 use std::sync::Arc;
@@ -17,9 +19,9 @@ mod aws;
 mod cron;
 mod distributed_filter;
 mod errors;
+mod metrics;
 mod models;
 mod redis;
-
 #[derive(Clone)]
 struct AppState {
     pool: PgPool,
@@ -31,6 +33,11 @@ async fn create_short_url(
     State(state): State<Arc<AppState>>,
     Json(payload): Json<CreateUrl>,
 ) -> Result<Json<UrlResponse>, AppError> {
+    // metrics
+    let start_metric = tokio::time::Instant::now();
+    REQUEST_COUNTER.inc();
+    //
+
     let short_code = match payload.custom_short_code {
         Some(custom) => custom,
         None => nanoid::nanoid!(8),
@@ -89,13 +96,13 @@ async fn create_short_url(
     {
         return Err(AppError::NotFound);
     }
-/////////////////////////
-    state
-        .redis
-        .set_short_url(&short_code, &payload.long_url)
-        .await?;
+    /////////////////////////
+    // state
+    //     .redis
+    //     .set_short_url(&short_code, &payload.long_url)
+    //     .await?;
 
-///////////////////////
+    ///////////////////////
     sqlx::query!(
         "INSERT INTO urls (short_code, long_url, expiry_date)
     VALUES ($1, $2, $3::date)",
@@ -116,6 +123,11 @@ async fn create_short_url(
 
     tracing::info!("Insertion: {:#?}", insertion);
 
+    // metrics:
+    let duration = start_metric.elapsed().as_secs_f64();
+    REQUEST_DURATION.with_label_values(&["create_url"]).observe(duration);
+    //
+
     Ok(Json(UrlResponse {
         short_code,
         long_url: payload.long_url,
@@ -127,6 +139,11 @@ async fn redirect_to_long_url(
     State(state): State<Arc<AppState>>,
     Path(short_code): Path<String>,
 ) -> Result<Redirect, AppError> {
+    // metric
+    let start = tokio::time::Instant::now();
+    REQUEST_COUNTER.inc();
+    //
+
     if !state
         .distributed_filter
         .lock()
@@ -136,11 +153,16 @@ async fn redirect_to_long_url(
         tracing::info!("Short code not found in filter");
         return Err(AppError::NotFound);
     }
+    // metric
+    let duration = start.elapsed().as_secs_f64();
+    REQUEST_DURATION.with_label_values(&["redirect"]).observe(duration);   
+    //
 
     match state.redis.get_long_url(&short_code).await? {
-        Some(long_url) =>{
+        Some(long_url) => {
             tracing::info!("Got it from redis");
-            return Ok(Redirect::permanent(&long_url))},
+            return Ok(Redirect::permanent(&long_url));
+        }
         None => {
             let url = sqlx::query!(
                 "SELECT long_url FROM urls
@@ -167,7 +189,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let pool = PgPool::connect(&database_url).await?;
 
     // Run migrations
-    sqlx::migrate!("./migrations").run(&pool).await?;
+    // sqlx::migrate!("./migrations").run(&pool).await?;
 
     // Initialize distributed filter system
     let distributed_filter = initialize_distributed_filter_system(
@@ -177,7 +199,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     )
     .await?;
 
-     let redis_manager = redis::RedisManager::new("redis://localhost:6379").await?;
+    let redis_manager = redis::RedisManager::new("redis://localhost:6379").await?;
 
     let app_state = Arc::new(AppState {
         pool: pool.clone(),
@@ -201,9 +223,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     //         .await;
     // });
 
+    tokio::spawn(collect_system_metrics());
+
     let app = Router::new()
         .route("/api/urls", post(create_short_url))
         .route("/{short_code}", get(redirect_to_long_url))
+        .route("/metrics", get(metrics_handler2))
         .layer(TraceLayer::new_for_http())
         .with_state(app_state);
 
@@ -212,4 +237,46 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     axum::serve(listener, app).await?;
 
     Ok(())
+}
+
+// async fn metrics_handler() -> Result<String, AppError> {
+//     let encoder = TextEncoder::new();
+//     let mut buffer = vec![];
+//     encoder
+//         .encode(&prometheus::gather(), &mut buffer)
+//         .map_err(|e| AppError::Prometheus(e))?;
+//     String::from_utf8(buffer)
+//         .map_err(|e| AppError::Prometheus(prometheus::Error::Msg(e.to_string())))
+// }
+
+async fn metrics_handler2() -> impl axum::response::IntoResponse {
+    let encoder = TextEncoder::new();
+    let metric_families = prometheus::gather();
+    let mut buffer = Vec::new();
+    encoder.encode(&metric_families, &mut buffer).unwrap();
+    
+    // Create response with correct content type
+    (
+        axum::http::StatusCode::OK,
+        [(axum::http::header::CONTENT_TYPE, "text/plain; version=0.0.4")],
+        buffer,
+    )
+}
+// System metrics collection task
+async fn collect_system_metrics() {
+    let mut interval = tokio::time::interval(std::time::Duration::from_secs(15));
+    loop {
+        interval.tick().await;
+
+        // Update CPU usage
+        if let Ok(cpu) = sys_info::loadavg() {
+            CPU_USAGE.set(cpu.one * 100.0);
+        }
+
+        // Update memory usage
+        if let Ok(mem) = sys_info::mem_info() {
+            let used_mem = mem.total - mem.free - mem.buffers - mem.cached;
+            MEMORY_USAGE.set(used_mem as f64);
+        }
+    }
 }

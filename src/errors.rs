@@ -8,6 +8,8 @@ pub enum AppError {
     NotFound,
     #[error("Redis error: {0}")]
     Redis(#[from] redis::RedisError),
+    #[error("Promethues error: {0}")]
+    Prometheus(#[from] prometheus::Error),
 }
 
 impl axum::response::IntoResponse for AppError {
@@ -22,6 +24,11 @@ impl axum::response::IntoResponse for AppError {
             AppError::Redis(err) => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 format!("Redis error: {}", err),
+            )
+                .into_response(),
+            AppError::Prometheus(err) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Prometheus error: {}", err),
             )
                 .into_response(),
         }
