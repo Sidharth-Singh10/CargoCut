@@ -29,20 +29,32 @@ The service uses a partitioned database schema:
 - Automatic partitioning based on 36-month intervals
 - Future table for URLs with expiry > 36 months
 
-### Distributed Quotient Filter
+# Quotient Filter: A Brief Overview
 
-The service implements a Quotient Filter (similar to Bloom filters) for efficient URL lookup:
-- Space-efficient probabilistic data structure
-- Helps prevent duplicate short URLs
-- Distributed across nodes for scalability
-- Periodic snapshots for persistence
-- Automatic recovery from failures
+A **Quotient Filter** is a **probabilistic data structure** that is used for efficient membership testing, similar to **Bloom Filters**, but with some key differences. It is space-efficient, meaning it uses less memory for storing elements, and is particularly effective for applications requiring fast lookups with a small memory footprint.
 
-Key advantages over traditional Bloom filters:
-- Support for deletions
-- Better locality of reference  
-- Lower false positive rate at similar space usage
-- Efficient resizing capabilities
+## **Key Characteristics**
+- **Space-efficient**: Stores elements in a compact form, reducing the amount of memory required.
+- **Probabilistic**: Offers a tradeoff between memory usage and accuracy, meaning it can return false positives, but never false negatives.
+- **No False Negatives**: A lookup will never incorrectly report that an element is not in the filter when it actually is.
+- **False Positives**: It can return false positives, meaning it might incorrectly report that an element is in the filter when it is not.
+- **Efficient for large-scale datasets**: Ideal for scenarios like URL lookup, duplicate detection, etc.
+- **Scalable**: Can be distributed across multiple nodes for large systems, allowing for greater scalability and resilience.
+
+## **How It Works**
+1. **Hashing the Input**: Each element (e.g., a URL) is hashed, and the hash is split into two parts:
+   - **Quotient**: The leading portion of the hash.
+   - **Remainder**: The trailing portion of the hash.
+2. **Storage**: The quotient is used as an index to place the remainder in a table. The remainder is stored in a bucket at the corresponding index.
+3. **Lookups**: During lookups, the quotient part of the input is used to index into the filter. If the remainder is found in the corresponding bucket, the element is assumed to be in the filter (with a possibility of a false positive).
+4. **No False Negatives**: If an element is present in the filter, it is guaranteed to be in the set. If the filter reports that an element is absent, it is definitely not in the set.
+
+## **Benefits**
+- **Space Efficiency**: The Quotient Filter is more space-efficient than traditional hash tables and even Bloom Filters, making it suitable for high-performance applications with memory constraints.
+- **No False Negatives**: Unlike Bloom Filters, which may return false negatives, the Quotient Filter guarantees no false negatives, ensuring reliable lookups.
+- **Scalability**: It can be distributed across nodes in a distributed system, allowing for horizontal scaling while maintaining its space efficiency.
+- **Periodic Snapshots**: For persistence and fault tolerance, periodic snapshots of the filter can be saved to disk, ensuring data durability.
+- **Automatic Recovery**: In the case of a failure, the Quotient Filter can be recovered from its snapshots, ensuring minimal downtime.
 
 ## 📊 System Design
 
