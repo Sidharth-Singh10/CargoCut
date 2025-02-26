@@ -1,7 +1,8 @@
 use aws::persistance::initialize_distributed_filter_system;
 use axum::{
     extract::{Path, State},
-    response::Redirect,
+    http::{header, StatusCode},
+    response::{IntoResponse, Redirect, Response},
     routing::{get, post},
     Json, Router,
 };
@@ -11,7 +12,7 @@ use metrics::{CPU_USAGE, MEMORY_USAGE, REQUEST_COUNTER, REQUEST_DURATION};
 use models::{CreateUrl, UrlResponse};
 use prometheus::{Encoder, TextEncoder};
 use redis::RedisManager;
-use sqlx::PgPool;
+use sqlx::{migrate::Migrator, PgPool};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tower_http::trace::TraceLayer;
@@ -125,8 +126,10 @@ async fn create_short_url(
 
     // metrics:
     let duration = start_metric.elapsed().as_secs_f64();
-    REQUEST_DURATION.with_label_values(&["create_url"]).observe(duration);
-    //
+    REQUEST_DURATION
+        .with_label_values(&["create_url"])
+        .observe(duration);
+    //q
 
     Ok(Json(UrlResponse {
         short_code,
@@ -138,12 +141,11 @@ async fn create_short_url(
 async fn redirect_to_long_url(
     State(state): State<Arc<AppState>>,
     Path(short_code): Path<String>,
-) -> Result<Redirect, AppError> {
+) -> Response {
     // metric
     let start = tokio::time::Instant::now();
     REQUEST_COUNTER.inc();
     //
-
     if !state
         .distributed_filter
         .lock()
@@ -151,45 +153,52 @@ async fn redirect_to_long_url(
         .contains(&short_code, chrono::Utc::now().date_naive())
     {
         tracing::info!("Short code not found in filter");
-        return Err(AppError::NotFound);
+        return AppError::NotFound.into_response();
     }
     // metric
     let duration = start.elapsed().as_secs_f64();
-    REQUEST_DURATION.with_label_values(&["redirect"]).observe(duration);   
+    REQUEST_DURATION
+        .with_label_values(&["redirect"])
+        .observe(duration);
     //
-
-    match state.redis.get_long_url(&short_code).await? {
-        Some(long_url) => {
+    match state.redis.get_long_url(&short_code).await {
+        Ok(Some(long_url)) => {
             tracing::info!("Got it from redis");
-            return Ok(Redirect::permanent(&long_url));
+            Redirect::permanent(&long_url).into_response()
         }
-        None => {
-            let url = sqlx::query!(
+        Ok(None) => {
+            match sqlx::query!(
                 "SELECT long_url FROM urls
                  WHERE short_code = $1
                  AND expiry_date >= CURRENT_DATE",
                 short_code
             )
             .fetch_optional(&state.pool)
-            .await?
-            .ok_or(AppError::NotFound)?;
-
-            Ok(Redirect::permanent(&url.long_url))
+            .await
+            {
+                Ok(Some(url)) => Redirect::permanent(&url.long_url).into_response(),
+                _ => AppError::NotFound.into_response(),
+            }
         }
+        Err(_) => AppError::NotFound.into_response(),
     }
 }
-
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     dotenv::dotenv().ok();
     tracing_subscriber::fmt::init();
 
     let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
+    let redis_url = std::env::var("REDIS_URL").expect("REDIS_URL must be set");
 
     let pool = PgPool::connect(&database_url).await?;
 
     // Run migrations
     // sqlx::migrate!("./migrations").run(&pool).await?;
+    let migrator = Migrator::new(std::path::Path::new("./migrations")).await?;
+
+    // Run migrations
+    migrator.run(&pool).await?;
 
     // Initialize distributed filter system
     let distributed_filter = initialize_distributed_filter_system(
@@ -199,7 +208,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     )
     .await?;
 
-    let redis_manager = redis::RedisManager::new("redis://localhost:6379").await?;
+    let redis_manager = redis::RedisManager::new(&redis_url).await?;
 
     let app_state = Arc::new(AppState {
         pool: pool.clone(),
@@ -254,11 +263,14 @@ async fn metrics_handler2() -> impl axum::response::IntoResponse {
     let metric_families = prometheus::gather();
     let mut buffer = Vec::new();
     encoder.encode(&metric_families, &mut buffer).unwrap();
-    
+
     // Create response with correct content type
     (
         axum::http::StatusCode::OK,
-        [(axum::http::header::CONTENT_TYPE, "text/plain; version=0.0.4")],
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "text/plain; version=0.0.4",
+        )],
         buffer,
     )
 }
