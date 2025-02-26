@@ -37,3 +37,5 @@ kubectl port-forward svc/prometheus-community-grafana 3000:80
 kubectl port-forward svc/cluster-with-metrics-rw 5432:5432 
 
 kubectl port-forward svc/cluster-with-metrics-rw 5432:5432   
+
+docker run -d --name some-redis -p 6379:6379 redis 
