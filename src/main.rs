@@ -12,8 +12,11 @@ use models::{CreateUrl, UrlResponse};
 use prometheus::{Encoder, TextEncoder};
 use redis::RedisManager;
 use sqlx::{migrate::Migrator, PgPool};
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 use tokio::sync::Mutex;
+use tower_governor::{
+    governor::GovernorConfigBuilder, key_extractor::PeerIpKeyExtractor, GovernorLayer,
+};
 use tower_http::trace::TraceLayer;
 mod aws;
 mod cron;
@@ -73,9 +76,9 @@ async fn create_short_url(
             .format("%m")
     );
 
-    tracing::info!("Partition name: {}", partition_name);
-    tracing::info!("End date: {}", end_month);
-    tracing::info!("{}-{}-01", expiry_date.year(), expiry_date.month());
+    println!("Partition name: {}", partition_name);
+    println!("End date: {}", end_month);
+    println!("{}-{}-01", expiry_date.year(), expiry_date.month());
 
     let query = format!(
         "CREATE TABLE IF NOT EXISTS {} 
@@ -121,7 +124,7 @@ async fn create_short_url(
             .date_naive(),
     );
 
-    tracing::info!("Insertion: {:#?}", insertion);
+    println!("Insertion: {:#?}", insertion);
 
     // metrics:
     let duration = start_metric.elapsed().as_secs_f64();
@@ -151,7 +154,7 @@ async fn redirect_to_long_url(
         .await
         .contains(&short_code, chrono::Utc::now().date_naive())
     {
-        tracing::info!("Short code not found in filter");
+        println!("Short code not found in filter");
         return AppError::NotFound.into_response();
     }
     // metric
@@ -162,7 +165,7 @@ async fn redirect_to_long_url(
     //
     match state.redis.get_long_url(&short_code).await {
         Ok(Some(long_url)) => {
-            tracing::info!("Got it from redis");
+            println!("Got it from redis");
             Redirect::permanent(&long_url).into_response()
         }
         Ok(None) => {
@@ -232,17 +235,59 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // });
 
     tokio::spawn(collect_system_metrics());
+    let write_limit = Arc::new(
+        GovernorConfigBuilder::default()
+            .per_second(5) // 5 writes per second
+            .burst_size(10) // Allow bursts up to 10
+            .use_headers()
+            .key_extractor(PeerIpKeyExtractor)
+            .finish()
+            .unwrap(),
+    );
+    let read_limit = Arc::new(
+        GovernorConfigBuilder::default()
+            .per_second(20) // 20 reads per second
+            .burst_size(50) // Allow bursts up to 50
+            .use_headers()
+            .key_extractor(PeerIpKeyExtractor)
+            .finish()
+            .unwrap(),
+    );
+
+    let write_limit_limiter = write_limit.limiter().clone();
+    let read_limit_limiter = read_limit.limiter().clone();
+
+    tokio::spawn(async move {
+        loop {
+            std::thread::sleep(Duration::from_secs(60));
+            // println!("rate limiting storage size: {}", governor_limiter.len());
+            write_limit_limiter.retain_recent();
+            read_limit_limiter.retain_recent();
+        }
+    });
 
     let app = Router::new()
-        .route("/api/urls", post(create_short_url))
-        .route("/{short_code}", get(redirect_to_long_url))
+        .route(
+            "/api/urls",
+            post(create_short_url).layer(GovernorLayer {
+                config: write_limit,
+            }),
+        )
+        .route(
+            "/{short_code}",
+            get(redirect_to_long_url).layer(GovernorLayer { config: read_limit }),
+        )
         .route("/metrics", get(metrics_handler2))
         .layer(TraceLayer::new_for_http())
         .with_state(app_state);
 
     let listener = tokio::net::TcpListener::bind("0.0.0.0:3001").await?;
     println!("Server running on http://localhost:3001");
-    axum::serve(listener, app).await?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .await?;
 
     Ok(())
 }
