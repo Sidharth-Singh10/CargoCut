@@ -1,4 +1,4 @@
-use chrono::{Datelike, NaiveDate, Utc};
+use chrono::{Datelike, NaiveDate};
 use qfilter::Filter;
 use std::collections::HashMap;
 use tracing::info;
@@ -49,7 +49,7 @@ impl DistributedFilter {
         // Check current partitions
         // println!("curr")
         info!("Checking current partitions");
-        
+
         for filter in self.filters.values() {
             if filter.filter.contains(short_code) {
                 return true;

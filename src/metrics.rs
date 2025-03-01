@@ -1,6 +1,6 @@
 use lazy_static::lazy_static;
 use prometheus::{
-    register_counter, register_gauge, register_histogram, register_histogram_vec, register_int_counter_vec, register_int_gauge, Counter, Gauge, Histogram, HistogramVec, IntCounterVec, IntGauge
+    register_counter, register_gauge, register_histogram_vec, Counter, Gauge, HistogramVec,
 };
 
 lazy_static! {

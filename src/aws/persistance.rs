@@ -5,10 +5,10 @@ use chrono::{Datelike, NaiveDate, Utc};
 use qfilter::Filter;
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
-use tokio::sync::Mutex;
 use std::collections::HashMap;
 use std::error::Error;
 use std::sync::Arc;
+use tokio::sync::Mutex;
 
 use crate::distributed_filter::{generate_partition_name, DistributedFilter, PartitionFilter};
 
@@ -22,7 +22,7 @@ struct DistributedFilterSnapshot {
 // Separate the filter data from the actual Filter instance
 #[derive(Serialize, Deserialize, Debug, Clone)]
 struct PartitionFilterData {
-    filter_data: Vec<u8>,  // Raw bytes of the filter
+    filter_data: Vec<u8>, // Raw bytes of the filter
     start_date: NaiveDate,
     end_date: NaiveDate,
 }
@@ -52,18 +52,24 @@ impl DistributedFilterPersistence {
         })
     }
 
-    pub async fn save_snapshot(&self, distributed_filter: &DistributedFilter) -> Result<String, Box<dyn Error>> {
+    pub async fn save_snapshot(
+        &self,
+        distributed_filter: &DistributedFilter,
+    ) -> Result<String, Box<dyn Error>> {
         let mut partition_filters = HashMap::new();
         let mut total_items = 0u64;
 
         // Serialize each filter separately
         for (name, filter) in &distributed_filter.filters {
             let filter_bytes = bincode::serialize(&filter.filter)?;
-            partition_filters.insert(name.clone(), PartitionFilterData {
-                filter_data: filter_bytes,
-                start_date: filter.start_date,
-                end_date: filter.end_date,
-            });
+            partition_filters.insert(
+                name.clone(),
+                PartitionFilterData {
+                    filter_data: filter_bytes,
+                    start_date: filter.start_date,
+                    end_date: filter.end_date,
+                },
+            );
             total_items += filter.filter.len();
         }
 
@@ -117,17 +123,17 @@ impl DistributedFilterPersistence {
             .send()
             .await?;
 
-            let slice_of_objects = objects.contents();
+        let slice_of_objects = objects.contents();
 
-            let latest = match slice_of_objects
-                .iter()
-                .filter_map(|obj| obj.last_modified.map(|lm| (lm, obj)))
-                .max_by_key(|&(lm, _)| lm)
-                .map(|(_, obj)| obj)
-            {
-                Some(obj) => obj,
-                None => return Ok(None),
-            };
+        let latest = match slice_of_objects
+            .iter()
+            .filter_map(|obj| obj.last_modified.map(|lm| (lm, obj)))
+            .max_by_key(|&(lm, _)| lm)
+            .map(|(_, obj)| obj)
+        {
+            Some(obj) => obj,
+            None => return Ok(None),
+        };
 
         let response = self
             .s3_client
@@ -138,7 +144,7 @@ impl DistributedFilterPersistence {
             .await?;
 
         let data = response.body.collect().await?.into_bytes();
-        
+
         // Deserialize the snapshot
         let snapshot: DistributedFilterSnapshot = bincode::deserialize(&data)?;
 
@@ -149,12 +155,15 @@ impl DistributedFilterPersistence {
         for (name, filter_data) in snapshot.partition_filters {
             // Deserialize the filter from bytes
             let filter: Filter = bincode::deserialize(&filter_data.filter_data)?;
-            
-            distributed_filter.filters.insert(name, PartitionFilter {
-                filter,
-                start_date: filter_data.start_date,
-                end_date: filter_data.end_date,
-            });
+
+            distributed_filter.filters.insert(
+                name,
+                PartitionFilter {
+                    filter,
+                    start_date: filter_data.start_date,
+                    end_date: filter_data.end_date,
+                },
+            );
         }
 
         // Restore future partition if it exists
@@ -212,11 +221,11 @@ impl DistributedFilterPersistence {
 
 // Update initialize_distributed_filter_system to use persistence
 pub async fn initialize_distributed_filter_system(
-    pool: &PgPool,
+    _pool: &PgPool,
     bucket: String,
     prefix: String,
 ) -> Result<Arc<Mutex<DistributedFilter>>, Box<dyn Error>> {
-    let persistence = DistributedFilterPersistence::new(bucket, prefix).await?;
+    let _persistence = DistributedFilterPersistence::new(bucket, prefix).await?;
 
     // Try to load the latest snapshot
     // if let Some(distributed_filter) = persistence.load_latest_snapshot().await? {

@@ -1,7 +1,6 @@
 use aws::persistance::initialize_distributed_filter_system;
 use axum::{
     extract::{Path, State},
-    http::{header, StatusCode},
     response::{IntoResponse, Redirect, Response},
     routing::{get, post},
     Json, Router,
@@ -247,16 +246,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     Ok(())
 }
-
-// async fn metrics_handler() -> Result<String, AppError> {
-//     let encoder = TextEncoder::new();
-//     let mut buffer = vec![];
-//     encoder
-//         .encode(&prometheus::gather(), &mut buffer)
-//         .map_err(|e| AppError::Prometheus(e))?;
-//     String::from_utf8(buffer)
-//         .map_err(|e| AppError::Prometheus(prometheus::Error::Msg(e.to_string())))
-// }
 
 async fn metrics_handler2() -> impl axum::response::IntoResponse {
     let encoder = TextEncoder::new();
