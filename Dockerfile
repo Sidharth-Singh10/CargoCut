@@ -1,37 +1,36 @@
-FROM rust:1.75 as builder
-
+FROM rust:1.82.0-slim as builder
 WORKDIR /usr/src/app
+
+# Copy entire project
 COPY . .
 
-# Install sqlx-cli for migrations
-RUN cargo install sqlx-cli --no-default-features --features postgres
-
-# Build the application with release profile
+# Build the application
 RUN cargo build --release
 
-# Create a smaller image for the runtime
 FROM debian:bookworm-slim
-
-# Install required dependencies for SSL and PostgreSQL
-RUN apt-get update && apt-get install -y \
-    libssl-dev \
-    libpq-dev \
-    ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
-
+# Install runtime dependencies in one layer
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+    libssl3 \
+    libpq5 \
+    ca-certificates && \
+    rm -rf /var/lib/apt/lists/*
+    
 WORKDIR /app
 
-# Copy the binary from the builder stage
-COPY --from=builder /usr/src/app/target/release/url-shortener /app/url-shortener
+# Copy the correct binary name from the builder stage
+COPY --from=builder /usr/src/app/target/release/cargocut /app/cargocut
 # Copy migrations folder for database setup
-COPY --from=builder /usr/src/app/migrations /app/migrations
+COPY --from=builder /usr/src/app/migrations /app/migrations/
 
-# Expose the port your application runs on
-EXPOSE 8080
+# Use non-root user for security
+RUN useradd -m appuser && chown -R appuser:appuser /app
+USER appuser
 
-# Set environment variables (these will be overridden in k8s deployment)
-ENV DATABASE_URL=postgres://postgres:postgres@localhost:5432/urlshortener
+EXPOSE 3001
+ENV DATABASE_URL=example
 ENV REDIS_URL=redis://localhost:6379
 
+
 # Run migrations and start the application
-CMD sqlx migrate run && ./url-shortener
+CMD ["./cargocut"]

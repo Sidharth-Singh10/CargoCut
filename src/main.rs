@@ -98,10 +98,10 @@ async fn create_short_url(
         return Err(AppError::NotFound);
     }
     /////////////////////////
-    // state
-    //     .redis
-    //     .set_short_url(&short_code, &payload.long_url)
-    //     .await?;
+    state
+        .redis
+        .set_short_url(&short_code, &payload.long_url)
+        .await?;
 
     ///////////////////////
     sqlx::query!(
