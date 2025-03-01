@@ -220,10 +220,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Schedule cleanup task
     tokio::spawn(async move {
-        let mut interval = tokio::time::interval(chrono::Duration::days(1).to_std().unwrap());
+        let mut interval = tokio::time::interval(chrono::Duration::days(30).to_std().unwrap());
         loop {
             interval.tick().await;
             if let Err(e) = cron::cleanup_expired_partitions(&pool).await {
+                eprintln!("Cleanup error: {}", e);
+            }
+
+            if let Err(e) = distributed_filter
+                .lock()
+                .await
+                .cleanup_expired_partitions(&pool)
+                .await
+            {
                 eprintln!("Cleanup error: {}", e);
             }
         }
