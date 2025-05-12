@@ -29,6 +29,17 @@ The service uses a partitioned database schema:
 - Automatic partitioning based on 36-month intervals
 - Future table for URLs with expiry > 36 months
 
+### Partitioning Strategy:
+
+The shortened_urls table is partitioned by month-year basis to facilitate efficient cleanup of expired URLs. This allows us to:
+
+- Drop entire partitions of expired URLs when all URLs in that partition are expired
+- Run maintenance tasks only on specific partitions rather than the entire table
+- Partition pruning improves recent URL query performance by allowing PostgreSQL to scan only the current month's partition (which likely contains most actively accessed URLs), keeping this "hot" data in memory, maintaining smaller indexes for faster lookups, and reducing lock contention between read/write operations.
+
+Partitioning by month is superior to traditional row-by-row deletion because it allows for bulk partition drops, which are nearly instantaneous operations regardless of partition size, avoiding the heavy I/O, transaction logging, and index maintenance overhead of individual DELETE operations. Additionally, this approach prevents table fragmentation and reduces the need for frequent VACUUM operations, maintaining consistent query performance as the database grows. At the same time, it's highly useful in replication environments like we are using with CloudNative PG, with near <100ms average replication lag even for heavy datasets.
+
+
 # Quotient Filter: A Brief Overview
 
 A **Quotient Filter** is a **probabilistic data structure** that is used for efficient membership testing, similar to **Bloom Filters**, but with some key differences. It is space-efficient, meaning it uses less memory for storing elements, and is particularly effective for applications requiring fast lookups with a small memory footprint.
@@ -58,12 +69,35 @@ A **Quotient Filter** is a **probabilistic data structure** that is used for eff
 
 ## 📊 System Design
 
-### URL Writing Process
-![q4](https://github.com/user-attachments/assets/77512f6e-9528-4c08-add2-ae20aa3a6621)
+### Flow
 
+### Write-Request-Scenario-1:
+2 concurrent requests are sent out, one directly to the database and other to the quotient filter.
 
-### URL Reading Process 
-![q5](https://github.com/user-attachments/assets/db40a7b1-7c5b-43da-88e3-f3c64c5c0d5d)
+![image](https://github.com/user-attachments/assets/9b82c176-2211-4e6e-8329-94d9216fa813)
+
+### Write-Request-Scenario-2:
+If a write request to the database fails,and the request to the quotient filter succeeds , a rollback request is sent to the quotient filter which removes the entry from the quotient filter, since quotient filters support removal of elements.
+
+![image](https://github.com/user-attachments/assets/39ea8eb6-ebb6-49af-bd3c-da1cbe885946)
+
+### Read-Request-Scenario-1:
+If in the read request short-url is not found in the quotient filter, Error 404 is returned to the user.
+
+![image](https://github.com/user-attachments/assets/7b647db8-9094-4aea-9f77-152e2c88766c)
+
+### Read-Request-Scenario-2:
+If the short-url if found in the quotient filter then, redis is checked , if exists in redis, then short-url is successfully returned to user.
+
+![image](https://github.com/user-attachments/assets/dc3cde35-217a-4254-8b12-e2a61e0c7f94)
+
+### Read-Request-Scenario-3:
+If the short-url if found in the quotient filter then, redis is checked , if it does not exists in redis, then a read-only replica is checked, if found,short-url is returned to the backend, at the same time a parallel request which is an independent process, whose task is to insert short_url(key) and original_url(value) into redis.
+
+![image](https://github.com/user-attachments/assets/788bec82-48d7-4cd7-9fc8-5fb860469d20)
+
+### Read-Request-Scenario-4:
+![image](https://github.com/user-attachments/assets/3712d18f-b0a3-4ec8-a7ed-a2e5ec57a282)
 
 
 ### Service Startup and Recovery
@@ -71,7 +105,6 @@ A **Quotient Filter** is a **probabilistic data structure** that is used for eff
 
 
 ## 📷 Architecture Diagrams 
-![q3](https://github.com/user-attachments/assets/cd003806-59ce-41a9-8cbb-6dab4af07218)
 ![q1](https://github.com/user-attachments/assets/fe0ea380-1d19-4fa6-ab57-0dea0418faae)
 ![q2](https://github.com/user-attachments/assets/3e862184-ce4c-4489-8c7c-fd8f85348017)
 
